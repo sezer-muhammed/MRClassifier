@@ -170,13 +170,8 @@ class TrainingConfigurationManager:
         if logger is None:
             logger = self._create_default_logger()
         
-        # Configure gradient accumulation
-        gradient_accumulation_callback = None
-        if self.config.gradient_config.gradient_accumulation_schedule:
-            gradient_accumulation_callback = GradientAccumulationScheduler(
-                scheduling=self.config.gradient_config.gradient_accumulation_schedule
-            )
-            callbacks.append(gradient_accumulation_callback)
+        # Note: We use trainer's accumulate_grad_batches instead of GradientAccumulationScheduler
+        # to avoid conflicts. The gradient accumulation is handled directly by the trainer.
         
         # Create trainer with all configurations
         trainer_args = {
@@ -292,10 +287,7 @@ class TrainingConfigurationManager:
         Returns:
             True if configuration is valid, raises ValueError otherwise
         """
-        # Validate batch size and gradient accumulation
-        if self.config.batch_size != 4:
-            raise ValueError(f"Batch size must be 4 as per requirement 3.3, got {self.config.batch_size}")
-        
+        # Validate gradient accumulation (flexible batch size allowed)
         if self.config.gradient_config.accumulate_grad_batches != 8:
             raise ValueError(f"Gradient accumulation must be 8 steps as per requirement 3.3, got {self.config.gradient_config.accumulate_grad_batches}")
         

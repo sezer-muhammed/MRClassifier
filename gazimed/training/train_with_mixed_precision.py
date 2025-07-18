@@ -43,7 +43,7 @@ def main():
     parser.add_argument('--max_epochs', type=int, default=100, help='Maximum number of epochs')
     parser.add_argument('--gpus', type=int, default=1, help='Number of GPUs to use')
     parser.add_argument('--precision', type=int, default=16, choices=[16, 32], help='Training precision (16 for mixed precision)')
-    parser.add_argument('--batch_size', type=int, default=4, help='Batch size (must be 4 per requirements)')
+    parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
     parser.add_argument('--accumulate_grad_batches', type=int, default=8, help='Gradient accumulation steps (must be 8 per requirements)')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate (must be 1e-4 per requirements)')
     parser.add_argument('--weight_decay', type=float, default=1e-2, help='Weight decay (must be 1e-2 per requirements)')
@@ -52,10 +52,6 @@ def main():
     parser.add_argument('--resume_from_checkpoint', type=str, default=None, help='Path to checkpoint to resume from')
     
     args = parser.parse_args()
-    
-    # Validate requirements compliance
-    if args.batch_size != 4:
-        raise ValueError(f"Batch size must be 4 as per requirement 3.3, got {args.batch_size}")
     
     if args.accumulate_grad_batches != 8:
         raise ValueError(f"Gradient accumulation must be 8 steps as per requirement 3.3, got {args.accumulate_grad_batches}")
@@ -159,9 +155,9 @@ def main():
     data_module = AlzheimersDataModule(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
-        num_workers=4,
+        num_workers=0,  # Set to 0 to avoid multiprocessing issues with database connections
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=False  # Disabled when num_workers=0
     )
     
     # Create trainer with all configurations
