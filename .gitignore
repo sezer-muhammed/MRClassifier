@@ -145,7 +145,7 @@ test_*.db
 
 # Model checkpoints and artifacts
 checkpoints/
-models/
+# models/
 *.ckpt
 *.pth
 *.pt
@@ -164,7 +164,7 @@ logs/
 wandb/
 
 # Data directories
-data/
+# data/
 datasets/
 raw_data/
 processed_data/
