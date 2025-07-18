@@ -34,7 +34,7 @@ class AlzheimersLightningModule(pl.LightningModule):
     def __init__(
         self,
         # Model architecture parameters
-        img_size: Tuple[int, int, int] = (91, 120, 91),
+        img_size: Tuple[int, int, int] = (91, 109, 91),
         patch_size: Tuple[int, int, int] = (4, 4, 4),
         in_channels: int = 2,  # MRI + PET
         embed_dim: int = 96,
@@ -43,7 +43,7 @@ class AlzheimersLightningModule(pl.LightningModule):
         window_size: Tuple[int, int, int] = (7, 7, 7),
         
         # Clinical features parameters
-        clinical_features_dim: int = 118,
+        clinical_features_dim: int = 116,
         clinical_hidden_dims: List[int] = [256, 512, 256],
         clinical_output_dim: int = 128,
         
@@ -115,11 +115,39 @@ class AlzheimersLightningModule(pl.LightningModule):
         self.loss_type = loss_type
         self.use_mixed_precision = use_mixed_precision
         
-        # Image processing branch - Swin-UNETR encoder
+        # Image processing branch - Swin-UNETR encoders
+        # Main encoder for combined input
         self.image_encoder = SwinUNETR(
             img_size=img_size,
             patch_size=patch_size,
             in_channels=in_channels,
+            embed_dim=embed_dim,
+            depths=depths,
+            num_heads=num_heads,
+            window_size=window_size,
+            drop_rate=dropout,
+            attn_drop_rate=dropout,
+            drop_path_rate=0.1
+        )
+        
+        # Separate encoders for individual modalities (single channel each)
+        self.mri_encoder = SwinUNETR(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_channels=1,  # Single channel for MRI
+            embed_dim=embed_dim,
+            depths=depths,
+            num_heads=num_heads,
+            window_size=window_size,
+            drop_rate=dropout,
+            attn_drop_rate=dropout,
+            drop_path_rate=0.1
+        )
+        
+        self.pet_encoder = SwinUNETR(
+            img_size=img_size,
+            patch_size=patch_size,
+            in_channels=1,  # Single channel for PET
             embed_dim=embed_dim,
             depths=depths,
             num_heads=num_heads,
@@ -231,25 +259,24 @@ class AlzheimersLightningModule(pl.LightningModule):
         Returns:
             Alzheimer's score predictions of shape (B, 1)
         """
-        # Process images through Swin-UNETR encoder
-        image_features_list = self.image_encoder(images)
-        
         # For cross-modal fusion, we need to separate MRI and PET features
         # Assuming input has 2 channels: [MRI, PET]
         if images.shape[1] == 2:
             mri_images = images[:, 0:1]  # First channel
             pet_images = images[:, 1:2]  # Second channel
             
-            # Process each modality separately to get features
-            mri_features_list = self.image_encoder(mri_images)
-            pet_features_list = self.image_encoder(pet_images)
+            # Process each modality separately using dedicated encoders
+            mri_features_list = self.mri_encoder(mri_images)
+            pet_features_list = self.pet_encoder(pet_images)
             
             # Apply cross-modal fusion
             fused_image_features, _ = self.cross_modal_fusion(
                 mri_features_list, pet_features_list
             )
         else:
-            # If we have combined features, use hierarchical fusion on the same features
+            # If we have combined features, process with main encoder
+            image_features_list = self.image_encoder(images)
+            # Use hierarchical fusion on the same features
             fused_image_features, _ = self.cross_modal_fusion(
                 image_features_list, image_features_list
             )
@@ -268,9 +295,9 @@ class AlzheimersLightningModule(pl.LightningModule):
     
     def _shared_step(self, batch: Dict[str, torch.Tensor], stage: str) -> Dict[str, torch.Tensor]:
         """Shared step for training, validation, and testing."""
-        images = batch['images']
+        images = batch['volumes']  # DataModule provides 'volumes' key
         clinical_features = batch['clinical_features']
-        targets = batch['targets']
+        targets = batch['alzheimer_score']  # DataModule provides 'alzheimer_score' key
         
         # Forward pass
         predictions = self(images, clinical_features)

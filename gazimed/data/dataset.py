@@ -13,8 +13,47 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import StratifiedKFold, train_test_split, KFold
 from sqlalchemy.orm import Session
+from tqdm import tqdm
 
 from gazimed.data.database import DatabaseManager, Subject
+
+
+def custom_collate_fn(batch):
+    """
+    Custom collate function that handles None values and ensures proper batch structure.
+    
+    Args:
+        batch: List of samples from the dataset
+        
+    Returns:
+        Dictionary with properly collated tensors
+    """
+    # Filter out None samples
+    valid_batch = [sample for sample in batch if sample is not None]
+    
+    if len(valid_batch) == 0:
+        raise ValueError("All samples in batch are None")
+    
+    # Get the keys from the first valid sample
+    keys = valid_batch[0].keys()
+    
+    collated = {}
+    for key in keys:
+        if key == 'metadata':
+            # Handle metadata separately (don't collate)
+            collated[key] = [sample[key] for sample in valid_batch]
+        elif key == 'subject_id':
+            # Handle subject IDs separately (don't collate)
+            collated[key] = [sample[key] for sample in valid_batch]
+        else:
+            # Collate tensors
+            values = [sample[key] for sample in valid_batch]
+            if all(isinstance(v, torch.Tensor) for v in values):
+                collated[key] = torch.stack(values)
+            else:
+                collated[key] = values
+    
+    return collated
 
 try:
     import nibabel as nib
@@ -100,7 +139,7 @@ class AlzheimersDataset(Dataset):
         
         # Validate subjects
         valid_subjects = []
-        for subject in subjects:
+        for subject in tqdm(subjects, desc="Validating subjects"):
             if self._validate_subject(subject):
                 valid_subjects.append(subject)
         
@@ -108,13 +147,26 @@ class AlzheimersDataset(Dataset):
     
     def _validate_subject(self, subject: Subject) -> bool:
         """Validate that subject has required data."""
-        if not subject.validate_score():
+        try:
+            # Check Alzheimer's score
+            if not subject.validate_score():
+                return False
+            
+            # Check clinical features
+            if not subject.validate_clinical_features():
+                return False
+            
+            # Check that clinical_features is not None
+            if subject.clinical_features is None:
+                return False
+            
+            # Check file paths if loading volumes
+            if self.load_volumes and not subject.validate_paths():
+                return False
+            
+            return True
+        except Exception as e:
             return False
-        if not subject.validate_clinical_features():
-            return False
-        if self.load_volumes and not subject.validate_paths():
-            return False
-        return True
     
     def _load_nifti_volume(self, file_path: str) -> np.ndarray:
         """Load NIfTI volume and return as numpy array."""
@@ -156,7 +208,7 @@ class AlzheimersDataset(Dataset):
     def __len__(self) -> int:
         return len(self.subjects)
     
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
+    def __getitem__(self, idx: int) -> Optional[Dict[str, Any]]:
         """
         Get a single sample.
         
@@ -167,31 +219,59 @@ class AlzheimersDataset(Dataset):
             - 'alzheimer_score': Target score [1]
             - 'subject_id': Subject identifier
             - 'metadata': Additional subject metadata
-        """
-        subject = self.subjects[idx]
-        
-        sample = {
-            'subject_id': subject.subject_id,
-            'alzheimer_score': torch.tensor(subject.alzheimer_score, dtype=torch.float32),
-            'clinical_features': torch.tensor(subject.clinical_features, dtype=torch.float32),
-            'metadata': {
-                'age': subject.age,
-                'sex': subject.sex,
-                'dataset_source': subject.dataset_source,
-                'acquisition_date': subject.acquisition_date
-            }
-        }
-        
-        if self.load_volumes:
-            # Get combined volumes (already stacked with proper channels)
-            combined_volume = self._get_volumes(subject)
-            sample['volumes'] = torch.tensor(combined_volume, dtype=torch.float32)
             
-            # Apply transforms if provided
-            if self.transform is not None:
-                sample = self.transform(sample)
-        
-        return sample
+            Returns None if sample is invalid
+        """
+        try:
+            subject = self.subjects[idx]
+            
+            # Double-check validation
+            if not self._validate_subject(subject):
+                return None
+            
+            # Ensure clinical_features is valid
+            if subject.clinical_features is None:
+                return None
+            
+            # Convert clinical features to numpy array first for validation
+            try:
+                clinical_features = np.array(subject.clinical_features, dtype=np.float32)
+                if clinical_features.shape[0] != 116:
+                    return None
+            except Exception as e:
+                return None
+            
+            sample = {
+                'subject_id': subject.subject_id,
+                'alzheimer_score': torch.tensor(subject.alzheimer_score, dtype=torch.float32),
+                'clinical_features': torch.tensor(clinical_features, dtype=torch.float32),
+                'metadata': {
+                    'age': subject.age,
+                    'sex': subject.sex,
+                    'dataset_source': subject.dataset_source,
+                    'acquisition_date': subject.acquisition_date
+                }
+            }
+            
+            if self.load_volumes:
+                try:
+                    # Get combined volumes (already stacked with proper channels)
+                    combined_volume = self._get_volumes(subject)
+                    sample['volumes'] = torch.tensor(combined_volume, dtype=torch.float32)
+                except Exception as e:
+                    return None
+                
+                # Apply transforms if provided
+                if self.transform is not None:
+                    try:
+                        sample = self.transform(sample)
+                    except Exception as e:
+                        return None
+            
+            return sample
+            
+        except Exception as e:
+            return None
     
     def get_subject_info(self, idx: int) -> Subject:
         """Get full subject information for given index."""
@@ -541,7 +621,7 @@ def create_data_loaders(
         include_difference_channel=include_difference_channel
     )
     
-    # Create data loaders
+    # Create data loaders with custom collate function
     data_loaders = {
         'train': DataLoader(
             train_dataset,
@@ -549,7 +629,8 @@ def create_data_loaders(
             shuffle=True,
             num_workers=num_workers,
             pin_memory=True,
-            drop_last=True
+            drop_last=True,
+            collate_fn=custom_collate_fn
         ),
         'val': DataLoader(
             val_dataset,
@@ -557,7 +638,8 @@ def create_data_loaders(
             shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
-            drop_last=False
+            drop_last=False,
+            collate_fn=custom_collate_fn
         )
     }
     
@@ -579,7 +661,8 @@ def create_data_loaders(
             shuffle=False,
             num_workers=num_workers,
             pin_memory=True,
-            drop_last=False
+            drop_last=False,
+            collate_fn=custom_collate_fn
         )
     
     return data_loaders
