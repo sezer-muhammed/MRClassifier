@@ -93,32 +93,47 @@
 
 
 
-  - [ ] 4.2 Create cross-validation data splitting
+  - [x] 4.2 Create cross-validation data splitting
     - Implement 5-fold cross-validation with stratified splitting
     - Add data splitting utilities that work with database queries
     - Create PyTorch DataLoaders with proper batch size and workers
     - _Requirements: 4.1_
 
-- [ ] 5. Implement core model architecture components
-  - [ ] 5.1 Create 3D patch embedding module
+- [x] 5. Implement core model architecture components
+
+
+
+
+
+
+
+
+  - [x] 5.1 Create 3D patch embedding module
     - Implement PatchEmbed3D with configurable patch size (4³) and embedding dimension (96)
     - Add positional encoding for 3D patches
+
+
     - Write unit tests for patch embedding dimensions and functionality
     - _Requirements: 2.1_
 
-  - [ ] 5.2 Implement Swin-UNETR encoder backbone
+  - [x] 5.2 Implement Swin-UNETR encoder backbone
+
+
     - Create SwinTransformer3D with 4 stages and window size 7³
     - Implement shifted window attention mechanism for 3D data
     - Add layer normalization and residual connections
     - _Requirements: 2.2_
 
-  - [ ] 5.3 Build cross-attention fusion module
+
+
+
+  - [x] 5.3 Build cross-attention fusion module
     - Implement CrossModalAttention with MRI as queries, PET as keys/values
     - Use 2 attention heads with dimension 48 as specified
     - Add attention dropout and output projection layers
     - _Requirements: 2.3, 2.4_
 
-  - [ ] 5.4 Create clinical features encoder
+  - [x] 5.4 Create clinical features encoder
     - Implement MLP branch for 118 numerical clinical features
     - Add dropout layers and ReLU activations for regularization
     - Create feature normalization and scaling utilities
