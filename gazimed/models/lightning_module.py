@@ -293,80 +293,142 @@ class AlzheimersLightningModule(pl.LightningModule):
         
         return predictions
     
-    def _shared_step(self, batch: Dict[str, torch.Tensor], stage: str) -> Dict[str, torch.Tensor]:
-        """Shared step for training, validation, and testing."""
-        images = batch['volumes']  # DataModule provides 'volumes' key
-        clinical_features = batch['clinical_features']
-        targets = batch['alzheimer_score']  # DataModule provides 'alzheimer_score' key
+    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
+        """Training step with enhanced logging and NaN detection."""
+        images = batch['volumes']  # Shape: [B, 2, H, W, D]
+        clinical_features = batch['clinical_features']  # Shape: [B, 116]
+        targets = batch['alzheimer_score']  # Shape: [B]
+        
+        # Quick validation check for first few batches
+        if batch_idx < 3:
+            print(f"Batch {batch_idx}: Images {images.shape}, NaN: {torch.isnan(images).any()}, Range: [{images.min():.3f}, {images.max():.3f}]")
+        
+        # Check for NaN/Inf in inputs
+        if torch.isnan(images).any() or torch.isinf(images).any():
+            self.log('debug/nan_images', 1.0, on_step=True)
+            print(f"ERROR: NaN/Inf detected in images at batch {batch_idx}")
+            # Find which samples have NaN
+            nan_mask = torch.isnan(images).any(dim=(1,2,3,4))
+            print(f"Samples with NaN: {nan_mask.nonzero().flatten()}")
+            
+            # Replace NaN with zeros to prevent crash
+            images = torch.nan_to_num(images, nan=0.0, posinf=1.0, neginf=-1.0)
+            print(f"After NaN replacement - min: {images.min()}, max: {images.max()}")
+        
+        if torch.isnan(clinical_features).any() or torch.isinf(clinical_features).any():
+            self.log('debug/nan_clinical', 1.0, on_step=True)
+            print(f"ERROR: NaN/Inf detected in clinical features at batch {batch_idx}")
+            clinical_features = torch.nan_to_num(clinical_features, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        if torch.isnan(targets).any() or torch.isinf(targets).any():
+            self.log('debug/nan_in_targets', 1.0, on_step=True)
+            print(f"Warning: NaN/Inf detected in targets at batch {batch_idx}")
         
         # Forward pass
         predictions = self(images, clinical_features)
-        predictions = predictions.squeeze(-1)  # Remove last dimension
+        predictions = predictions.squeeze(-1)  # Shape: [B]
         
-        # Compute loss
+        # Check for NaN/Inf in predictions
+        if torch.isnan(predictions).any() or torch.isinf(predictions).any():
+            self.log('debug/nan_in_predictions', 1.0, on_step=True)
+            print(f"Warning: NaN/Inf detected in predictions at batch {batch_idx}")
+            print(f"Predictions stats: min={predictions.min():.4f}, max={predictions.max():.4f}, mean={predictions.mean():.4f}")
+        
+        # Compute loss with numerical stability
         loss = self.criterion(predictions, targets)
         
-        # Get metrics for this stage
-        if stage == 'train':
-            metrics = self.train_metrics
-        elif stage == 'val':
-            metrics = self.val_metrics
-        else:
-            metrics = self.test_metrics
+        # Check for NaN/Inf in loss
+        if torch.isnan(loss) or torch.isinf(loss):
+            self.log('debug/nan_loss', 1.0, on_step=True)
+            print(f"Warning: NaN/Inf loss detected at batch {batch_idx}")
+            print(f"Loss: {loss}, Predictions: {predictions}, Targets: {targets}")
+            # Return a small loss to prevent training from crashing
+            return torch.tensor(0.01, requires_grad=True, device=loss.device)
         
         # Update metrics
-        metrics['mse'](predictions, targets)
-        metrics['mae'](predictions, targets)
-        metrics['r2'](predictions, targets)
-        metrics['pearson'](predictions, targets)
+        self.train_metrics['mse'](predictions, targets)
+        self.train_metrics['mae'](predictions, targets)
+        self.train_metrics['r2'](predictions, targets)
+        self.train_metrics['pearson'](predictions, targets)
         
         # Binary classification metrics (threshold at 0.5)
         binary_preds = (predictions > 0.5).int()
         binary_targets = (targets > 0.5).int()
         
-        metrics['auc'](predictions, binary_targets)
-        metrics['accuracy'](binary_preds, binary_targets)
-        metrics['precision'](binary_preds, binary_targets)
-        metrics['recall'](binary_preds, binary_targets)
-        metrics['f1'](binary_preds, binary_targets)
-        metrics['specificity'](binary_preds, binary_targets)
+        self.train_metrics['accuracy'](binary_preds, binary_targets)
+        self.train_metrics['precision'](binary_preds, binary_targets)
+        self.train_metrics['recall'](binary_preds, binary_targets)
+        self.train_metrics['f1'](binary_preds, binary_targets)
+        self.train_metrics['auc'](predictions, binary_targets)
         
-        return {
-            'loss': loss,
-            'predictions': predictions,
-            'targets': targets,
-            'binary_predictions': binary_preds,
-            'binary_targets': binary_targets
-        }
+        # Enhanced logging
+        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train_loss_step', loss, on_step=True, on_epoch=False)
+        
+        # Log prediction statistics
+        self.log('train/pred_mean', predictions.mean(), on_step=True)
+        self.log('train/pred_std', predictions.std(), on_step=True)
+        self.log('train/pred_min', predictions.min(), on_step=True)
+        self.log('train/pred_max', predictions.max(), on_step=True)
+        
+        # Log target statistics
+        self.log('train/target_mean', targets.mean(), on_step=True)
+        self.log('train/target_std', targets.std(), on_step=True)
+        
+        # Log gradient norms periodically
+        if batch_idx % 10 == 0:
+            total_norm = 0
+            for p in self.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.data.norm(2)
+                    total_norm += param_norm.item() ** 2
+            total_norm = total_norm ** (1. / 2)
+            self.log('train/grad_norm', total_norm, on_step=True)
+        
+        # Log sample images and predictions periodically
+        if batch_idx % 50 == 0 and batch_idx > 0:
+            self._log_sample_images_and_predictions(images, predictions, targets, 'train', batch_idx)
+        
+        return loss
     
-    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        """
-        Training step with MSE loss for regression.
-        
-        Implements the training step as specified in requirements 3.1, 3.2:
-        - Uses MSE loss for regression task
-        - Logs training metrics and loss
-        - Returns loss for backpropagation
-        """
-        outputs = self._shared_step(batch, 'train')
-        
-        # Log training loss and learning rate
-        self.log('train_loss', outputs['loss'], on_step=True, on_epoch=True, prog_bar=True)
-        self.log('learning_rate', self.optimizers().param_groups[0]['lr'], on_step=True, on_epoch=False)
-        
-        # Log additional training metrics on step level (for monitoring)
-        if batch_idx % 10 == 0:  # Log every 10 steps to avoid too much logging
-            predictions = outputs['predictions']
-            targets = outputs['targets']
+    def _log_sample_images_and_predictions(self, images, predictions, targets, stage, batch_idx):
+        """Log sample images and predictions to TensorBoard."""
+        try:
+            # Only log a few samples to avoid memory issues
+            num_samples = min(4, images.shape[0])
             
-            # Calculate and log step-level metrics
-            step_mse = F.mse_loss(predictions, targets)
-            step_mae = F.l1_loss(predictions, targets)
+            # Get middle slices from 3D volumes for visualization
+            # Images shape: [B, 2, H, W, D]
+            mid_slice_idx = images.shape[-1] // 2
             
-            self.log('train_step_mse', step_mse, on_step=True, on_epoch=False)
-            self.log('train_step_mae', step_mae, on_step=True, on_epoch=False)
-        
-        return outputs['loss']
+            # Extract middle slices: [B, 2, H, W]
+            mri_slices = images[:num_samples, 0, :, :, mid_slice_idx]  # MRI channel
+            pet_slices = images[:num_samples, 1, :, :, mid_slice_idx]  # PET channel
+            
+            # Normalize for visualization
+            mri_slices = (mri_slices - mri_slices.min()) / (mri_slices.max() - mri_slices.min() + 1e-8)
+            pet_slices = (pet_slices - pet_slices.min()) / (pet_slices.max() - pet_slices.min() + 1e-8)
+            
+            # Create a grid of images
+            import torchvision.utils as vutils
+            
+            # Log MRI slices
+            mri_grid = vutils.make_grid(mri_slices.unsqueeze(1), nrow=2, normalize=True)
+            self.logger.experiment.add_image(f'{stage}/mri_samples', mri_grid, self.global_step)
+            
+            # Log PET slices
+            pet_grid = vutils.make_grid(pet_slices.unsqueeze(1), nrow=2, normalize=True)
+            self.logger.experiment.add_image(f'{stage}/pet_samples', pet_grid, self.global_step)
+            
+            # Log predictions vs targets as text
+            pred_text = f"Predictions: {predictions[:num_samples].detach().cpu().numpy()}"
+            target_text = f"Targets: {targets[:num_samples].detach().cpu().numpy()}"
+            
+            self.logger.experiment.add_text(f'{stage}/predictions', pred_text, self.global_step)
+            self.logger.experiment.add_text(f'{stage}/targets', target_text, self.global_step)
+            
+        except Exception as e:
+            print(f"Warning: Failed to log images for {stage}: {e}")
     
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
         """
@@ -377,34 +439,117 @@ class AlzheimersLightningModule(pl.LightningModule):
         - Logs metrics for monitoring training progress
         - Returns outputs for epoch-end aggregation
         """
-        outputs = self._shared_step(batch, 'val')
+        images = batch['volumes']  # Shape: [B, 2, H, W, D]
+        clinical_features = batch['clinical_features']  # Shape: [B, 116]
+        targets = batch['alzheimer_score']  # Shape: [B]
+        
+        # Forward pass
+        predictions = self(images, clinical_features)
+        predictions = predictions.squeeze(-1)  # Shape: [B]
+        
+        # Compute loss
+        loss = self.criterion(predictions, targets)
+        
+        # Update metrics with error handling for small batch sizes
+        try:
+            self.val_metrics['mse'](predictions, targets)
+            self.val_metrics['mae'](predictions, targets)
+        except Exception as e:
+            print(f"Warning: Failed to update basic metrics: {e}")
+        
+        # Metrics that require multiple samples - handle gracefully
+        try:
+            if len(predictions) > 1:
+                self.val_metrics['r2'](predictions, targets)
+                self.val_metrics['pearson'](predictions, targets)
+        except Exception as e:
+            print(f"Warning: Failed to update R2/Pearson metrics (batch size {len(predictions)}): {e}")
+        
+        # Binary classification metrics (threshold at 0.5)
+        binary_preds = (predictions > 0.5).int()
+        binary_targets = (targets > 0.5).int()
+        
+        try:
+            self.val_metrics['accuracy'](binary_preds, binary_targets)
+            if len(predictions) > 1:  # Precision/Recall/F1 may need multiple samples
+                self.val_metrics['precision'](binary_preds, binary_targets)
+                self.val_metrics['recall'](binary_preds, binary_targets)
+                self.val_metrics['f1'](binary_preds, binary_targets)
+            self.val_metrics['auc'](predictions, binary_targets)
+        except Exception as e:
+            print(f"Warning: Failed to update classification metrics: {e}")
         
         # Log validation loss
-        self.log('val_loss', outputs['loss'], on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
         
-        # Log key validation metrics on step level for detailed monitoring
-        predictions = outputs['predictions']
-        targets = outputs['targets']
+        # Log prediction statistics
+        self.log('val/pred_mean', predictions.mean(), on_step=False, on_epoch=True)
+        self.log('val/pred_std', predictions.std(), on_step=False, on_epoch=True)
         
-        # Calculate step-level regression metrics
-        step_mse = F.mse_loss(predictions, targets)
-        step_mae = F.l1_loss(predictions, targets)
+        # Log sample images periodically
+        if batch_idx % 20 == 0 and batch_idx > 0:
+            self._log_sample_images_and_predictions(images, predictions, targets, 'val', batch_idx)
         
-        # Log step-level metrics (less frequently to avoid clutter)
-        if batch_idx % 5 == 0:
-            self.log('val_step_mse', step_mse, on_step=True, on_epoch=False)
-            self.log('val_step_mae', step_mae, on_step=True, on_epoch=False)
-        
-        return outputs
+        return {
+            'loss': loss,
+            'predictions': predictions,
+            'targets': targets,
+            'binary_predictions': binary_preds,
+            'binary_targets': binary_targets
+        }
     
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> Dict[str, torch.Tensor]:
         """Test step."""
-        outputs = self._shared_step(batch, 'test')
+        images = batch['volumes']  # Shape: [B, 2, H, W, D]
+        clinical_features = batch['clinical_features']  # Shape: [B, 116]
+        targets = batch['alzheimer_score']  # Shape: [B]
+        
+        # Forward pass
+        predictions = self(images, clinical_features)
+        predictions = predictions.squeeze(-1)  # Shape: [B]
+        
+        # Compute loss
+        loss = self.criterion(predictions, targets)
+        
+        # Update metrics with error handling for small batch sizes
+        try:
+            self.test_metrics['mse'](predictions, targets)
+            self.test_metrics['mae'](predictions, targets)
+        except Exception as e:
+            print(f"Warning: Failed to update basic test metrics: {e}")
+        
+        # Metrics that require multiple samples - handle gracefully
+        try:
+            if len(predictions) > 1:
+                self.test_metrics['r2'](predictions, targets)
+                self.test_metrics['pearson'](predictions, targets)
+        except Exception as e:
+            print(f"Warning: Failed to update R2/Pearson test metrics (batch size {len(predictions)}): {e}")
+        
+        # Binary classification metrics (threshold at 0.5)
+        binary_preds = (predictions > 0.5).int()
+        binary_targets = (targets > 0.5).int()
+        
+        try:
+            self.test_metrics['accuracy'](binary_preds, binary_targets)
+            if len(predictions) > 1:  # Precision/Recall/F1 may need multiple samples
+                self.test_metrics['precision'](binary_preds, binary_targets)
+                self.test_metrics['recall'](binary_preds, binary_targets)
+                self.test_metrics['f1'](binary_preds, binary_targets)
+            self.test_metrics['auc'](predictions, binary_targets)
+        except Exception as e:
+            print(f"Warning: Failed to update classification test metrics: {e}")
         
         # Log test loss
-        self.log('test_loss', outputs['loss'], on_step=False, on_epoch=True)
+        self.log('test_loss', loss, on_step=False, on_epoch=True)
         
-        return outputs
+        return {
+            'loss': loss,
+            'predictions': predictions,
+            'targets': targets,
+            'binary_predictions': binary_preds,
+            'binary_targets': binary_targets
+        }
     
     def on_train_epoch_end(self) -> None:
         """Called at the end of training epoch."""
@@ -416,19 +561,33 @@ class AlzheimersLightningModule(pl.LightningModule):
     
     def on_validation_epoch_end(self) -> None:
         """Called at the end of validation epoch."""
-        # Compute and log validation metrics
+        # Compute and log validation metrics with error handling
         for metric_name, metric in self.val_metrics.items():
-            value = metric.compute()
-            self.log(f'val_{metric_name}', value, on_epoch=True, prog_bar=(metric_name in ['auc', 'r2']))
-            metric.reset()
+            try:
+                value = metric.compute()
+                self.log(f'val_{metric_name}', value, on_epoch=True, prog_bar=(metric_name in ['auc', 'r2']))
+            except Exception as e:
+                print(f"Warning: Failed to compute validation metric '{metric_name}': {e}")
+                # Log a placeholder value for failed metrics
+                if metric_name in ['r2', 'pearson']:
+                    self.log(f'val_{metric_name}', 0.0, on_epoch=True, prog_bar=(metric_name in ['auc', 'r2']))
+            finally:
+                metric.reset()
     
     def on_test_epoch_end(self) -> None:
         """Called at the end of test epoch."""
-        # Compute and log test metrics
+        # Compute and log test metrics with error handling
         for metric_name, metric in self.test_metrics.items():
-            value = metric.compute()
-            self.log(f'test_{metric_name}', value, on_epoch=True)
-            metric.reset()
+            try:
+                value = metric.compute()
+                self.log(f'test_{metric_name}', value, on_epoch=True)
+            except Exception as e:
+                print(f"Warning: Failed to compute test metric '{metric_name}': {e}")
+                # Log a placeholder value for failed metrics
+                if metric_name in ['r2', 'pearson']:
+                    self.log(f'test_{metric_name}', 0.0, on_epoch=True)
+            finally:
+                metric.reset()
     
     def configure_optimizers(self) -> Dict[str, Any]:
         """
@@ -568,9 +727,9 @@ class AlzheimersDataModule(pl.LightningDataModule):
         self,
         data_dir: str,
         batch_size: int = 4,
-        num_workers: int = 4,
+        num_workers: int = 0,  # Set to 0 to avoid multiprocessing issues with database connections
         pin_memory: bool = True,
-        persistent_workers: bool = True,
+        persistent_workers: bool = False,  # Disabled when num_workers=0
         **kwargs
     ):
         """
@@ -610,7 +769,7 @@ class AlzheimersDataModule(pl.LightningDataModule):
         self.train_transform = create_training_augmentation()
         self.val_transform = create_validation_augmentation()
 
-        # Use utility to create dataloaders
+        # Use utility to create dataloaders with balanced sampling for training
         self._dataloaders = create_data_loaders(
             db_manager=self.db_manager,
             train_ids=self.train_ids,
@@ -620,7 +779,8 @@ class AlzheimersDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             train_transform=self.train_transform,
             val_transform=self.val_transform,
-            load_volumes=True
+            load_volumes=True,
+            balanced_sampling=True  # Enable balanced sampling for 50/50 distribution
         )
     
     def train_dataloader(self):

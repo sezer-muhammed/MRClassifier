@@ -181,15 +181,70 @@ class AlzheimersDataset(Dataset):
             raise RuntimeError(f"Failed to load NIfTI file {file_path}: {e}") from e
     
     def _get_volumes(self, subject: Subject) -> np.ndarray:
-        """Load and combine MRI and PET volumes for a subject."""
+        """Load and combine MRI and PET volumes for a subject using preprocessing pipeline."""
         cache_key = subject.subject_id
         
         if self.cache_volumes and cache_key in self.volume_cache:
             return self.volume_cache[cache_key]
         
-        # Load individual volumes
+        try:
+            # Use preprocessing pipeline for proper normalization and validation
+            from .preprocessing import PreprocessingPipeline
+            
+            # Create preprocessing pipeline
+            pipeline = PreprocessingPipeline(
+                apply_n4_correction=False,  # Skip N4 correction for speed
+                normalization_method='zscore',  # Use Z-score normalization
+                include_difference_channel=self.include_difference_channel,
+                target_size=(91, 109, 91)  # Match expected output size
+            )
+            
+            # Process volume pair through pipeline
+            combined_volume = pipeline.process_volume_pair(subject.mri_path, subject.pet_path)
+            
+            # Validate that the volume doesn't contain NaN values
+            if np.any(np.isnan(combined_volume)) or np.any(np.isinf(combined_volume)):
+                print(f"Warning: NaN/Inf values detected in preprocessed volume for subject {subject.subject_id}")
+                print(f"NaN count: {np.sum(np.isnan(combined_volume))}, Inf count: {np.sum(np.isinf(combined_volume))}")
+                
+                # Replace NaN/Inf with zeros as fallback
+                combined_volume = np.nan_to_num(combined_volume, nan=0.0, posinf=1.0, neginf=-1.0)
+                print(f"After NaN replacement - shape: {combined_volume.shape}, min: {combined_volume.min()}, max: {combined_volume.max()}")
+            
+            if self.cache_volumes:
+                self.volume_cache[cache_key] = combined_volume
+            
+            return combined_volume
+            
+        except Exception as e:
+            print(f"Error processing volumes for subject {subject.subject_id}: {e}")
+            # Fallback to simple loading if preprocessing fails
+            return self._get_volumes_fallback(subject)
+    
+    def _get_volumes_fallback(self, subject: Subject) -> np.ndarray:
+        """Fallback method for volume loading when preprocessing fails."""
+        print(f"Using fallback volume loading for subject {subject.subject_id}")
+        
+        # Load individual volumes using simple method
         mri_volume = self._load_nifti_volume(subject.mri_path)
         pet_volume = self._load_nifti_volume(subject.pet_path)
+        
+        # Basic normalization to prevent NaN issues
+        def safe_normalize(volume):
+            # Replace NaN/Inf with zeros
+            volume = np.nan_to_num(volume, nan=0.0, posinf=1.0, neginf=-1.0)
+            
+            # Simple min-max normalization
+            min_val, max_val = volume.min(), volume.max()
+            if max_val > min_val:
+                volume = (volume - min_val) / (max_val - min_val)
+            else:
+                volume = np.zeros_like(volume)
+            
+            return volume.astype(np.float32)
+        
+        mri_volume = safe_normalize(mri_volume)
+        pet_volume = safe_normalize(pet_volume)
         
         # Combine volumes into multi-channel tensor
         if self.include_difference_channel:
@@ -201,7 +256,7 @@ class AlzheimersDataset(Dataset):
             combined_volume = np.stack([mri_volume, pet_volume], axis=0)
         
         if self.cache_volumes:
-            self.volume_cache[cache_key] = combined_volume
+            self.volume_cache[subject.subject_id] = combined_volume
         
         return combined_volume
     
@@ -581,7 +636,8 @@ def create_data_loaders(
     val_transform=None,
     load_volumes: bool = True,
     include_difference_channel: bool = False,
-    subject_filter: Optional[Dict[str, Any]] = None
+    subject_filter: Optional[Dict[str, Any]] = None,
+    balanced_sampling: bool = False
 ) -> Dict[str, DataLoader]:
     """
     Create PyTorch DataLoaders for train/validation/test sets.
@@ -621,12 +677,49 @@ def create_data_loaders(
         include_difference_channel=include_difference_channel
     )
     
+    # Create balanced sampler for training data if requested
+    train_sampler = None
+    shuffle_train = True
+    if balanced_sampling:
+        from torch.utils.data import WeightedRandomSampler
+        
+        # Get alzheimer scores for all training subjects
+        scores = []
+        for subject in train_dataset.subjects:
+            scores.append(subject.alzheimer_score)
+        
+        # Create binary labels (0 for score < 0.5, 1 for score >= 0.5)
+        labels = [1 if score >= 0.5 else 0 for score in scores]
+        
+        # Calculate class weights for balanced sampling
+        class_counts = [labels.count(0), labels.count(1)]
+        total_samples = len(labels)
+        
+        # Create weights for each sample (inverse of class frequency)
+        weights = []
+        for label in labels:
+            if label == 0:
+                weights.append(total_samples / (2.0 * class_counts[0]))
+            else:
+                weights.append(total_samples / (2.0 * class_counts[1]))
+        
+        # Create weighted sampler
+        train_sampler = WeightedRandomSampler(
+            weights=weights,
+            num_samples=len(weights),
+            replacement=True
+        )
+        shuffle_train = False  # Don't shuffle when using sampler
+        
+        print(f"Balanced sampling enabled: Class 0 ({class_counts[0]} samples), Class 1 ({class_counts[1]} samples)")
+    
     # Create data loaders with custom collate function
     data_loaders = {
         'train': DataLoader(
             train_dataset,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=shuffle_train,
+            sampler=train_sampler,
             num_workers=num_workers,
             pin_memory=True,
             drop_last=True,
