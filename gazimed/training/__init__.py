@@ -28,3 +28,8 @@ try:
     from .schedulers import *
 except ImportError:
     pass
+
+try:
+    from .trainer_config import *
+except ImportError:
+    pass

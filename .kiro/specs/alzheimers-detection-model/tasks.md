@@ -139,27 +139,47 @@
     - Create feature normalization and scaling utilities
     - _Requirements: Design multimodal fusion_
 
-- [ ] 6. Build PyTorch Lightning training module
-  - [ ] 6.1 Implement AlzheimersLightningModule
+- [x] 6. Build PyTorch Lightning training module
+
+
+
+
+
+  - [x] 6.1 Implement AlzheimersLightningModule
+
+
     - Create Lightning module combining image and clinical branches
     - Implement forward pass with multimodal fusion
     - Add regression head with sigmoid activation for 0-1 output
     - _Requirements: 2.5, 2.6_
 
-  - [ ] 6.2 Add training and validation steps
+  - [x] 6.2 Add training and validation steps
+
+
     - Implement training_step with MSE loss for regression
     - Create validation_step with metric logging
     - Add learning rate scheduling with cosine annealing
     - _Requirements: 3.1, 3.2_
 
-  - [ ] 6.3 Configure optimizers and mixed precision
+
+
+  - [x] 6.3 Configure optimizers and mixed precision
+
+
+
+
+
+
     - Set up AdamW optimizer with specified learning rate and weight decay
     - Enable FP16 mixed precision training for memory efficiency
     - Add gradient clipping and accumulation support
     - _Requirements: 3.2, 3.3_
 
 - [ ] 7. Implement MAE-3D pretraining
+
   - [ ] 7.1 Create masked autoencoder for 3D volumes
+
+
     - Implement 3D patch masking with 75% mask ratio
     - Build MAE decoder for reconstruction task
     - Add reconstruction loss computation
