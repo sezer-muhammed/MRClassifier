@@ -59,7 +59,8 @@
 
 
 
-  - [ ] 3.2 Implement MNI registration and resampling
+  - [x] 3.2 Implement MNI registration and resampling
+
     - Write affine registration to MNI152 template using ANTs
     - Implement resampling to 1mm³ isotropic resolution
     - Add validation for output dimensions (91, 120, 91)
@@ -67,18 +68,30 @@
 
     - _Requirements: 1.2, 1.3_
 
-  - [ ] 3.3 Add Z-score normalization and volume combination
+  - [x] 3.3 Add Z-score normalization and volume combination
+
+
     - Implement per-volume Z-score normalization
     - Create function to combine MRI and PET into 2-channel or 3-channel tensor
     - Add optional difference channel (PET - MRI) computation
     - _Requirements: 1.4, 1.5_
 
-- [ ] 4. Add medical data augmentation
-  - [ ] 4.1 Implement medical image augmentations
+- [x] 4. Add medical data augmentation
+
+
+
+
+
+  - [x] 4.1 Implement medical image augmentations
+
+
     - Create RandAffine transforms with ±10° rotation using MONAI
     - Add RandFlip, RandBiasField, and Mixup augmentations
     - Build augmentation pipeline with configurable probabilities
     - _Requirements: 3.4_
+
+
+
 
   - [ ] 4.2 Create cross-validation data splitting
     - Implement 5-fold cross-validation with stratified splitting
