@@ -333,99 +333,17 @@ graph LR
     style I fill:#e3f2fd
 ```
 
-### Dataset Statistics
-
-| Dataset | Subjects | MRI Scans | PET Scans | Age Range | Gender Split |
-|---------|----------|-----------|-----------|-----------|-------------|
-| **ADNI** | 1,200+ | 1,200+ | 1,200+ | 55-90 | 52% F, 48% M |
-| **OASIS-3** | 800+ | 800+ | 400+ | 42-95 | 58% F, 42% M |
-| **AIBL** | 600+ | 600+ | 300+ | 60-85 | 55% F, 45% M |
-| **Total** | **2,600+** | **2,600+** | **1,900+** | **42-95** | **55% F, 45% M** |
-
 ---
 
 ## 🚀 Getting Started
-
-### Quick Start Guide
-
-1. **Environment Setup**
-   ```bash
-   git clone https://github.com/sezer-muhammed/MRClassifier.git
-   cd MRClassifier
-   pip install -r requirements.txt
-   ```
-
-2. **Data Preparation**
-   ```bash
-   python scripts/prepare_data.py --data_dir /path/to/dicom/files
-   ```
-
-3. **Training**
-   ```bash
-   python gazimed/training/train_with_mixed_precision.py \
-     --data_dir gazimed_database.db \
-     --output_dir ./training_outputs \
-     --max_epochs 100 \
-     --batch_size 4
-   ```
-
-4. **Inference**
-   ```bash
-   python scripts/inference.py \
-     --model_path ./checkpoints/best_model.ckpt \
-     --mri_path patient_mri.nii.gz \
-     --pet_path patient_pet.nii.gz \
-     --clinical_features clinical_data.json
-   ```
 
 ### Model Checkpoints
 
 | Model Version | Performance | Download | Size |
 |---------------|-------------|----------|------|
-| **v1.0-base** | AUC: 0.87 | [Download](https://releases/v1.0-base.ckpt) | 245 MB |
-| **v1.1-enhanced** | AUC: 0.91 | [Download](https://releases/v1.1-enhanced.ckpt) | 267 MB |
-| **v2.0-multimodal** | AUC: 0.94 | [Download](https://releases/v2.0-multimodal.ckpt) | 312 MB |
-
----
-
-## 📈 Monitoring & Visualization
-
-### TensorBoard Integration
-
-```bash
-# Start TensorBoard
-tensorboard --logdir=./training_outputs/logs
-
-# View training metrics at http://localhost:6006
-```
-
-### Available Visualizations
-
-- **Loss Curves**: Training/validation loss over epochs
-- **Metric Tracking**: AUC, correlation, MSE progression
-- **Sample Images**: MRI/PET slices with attention overlays
-- **Gradient Analysis**: Gradient norms and parameter updates
-- **Prediction Distribution**: Score histograms by diagnosis group
-
----
-
-## 🔬 Research & Development
-
-### Current Research Directions
-
-- **Longitudinal Modeling**: Tracking disease progression over time
-- **Federated Learning**: Multi-site training without data sharing
-- **Uncertainty Quantification**: Bayesian neural networks for confidence
-- **Interpretability**: Advanced attention mechanisms and saliency maps
-- **Multi-Task Learning**: Joint prediction of multiple cognitive assessments
-
-### Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+| **v1.0-base** | AUC: 0 | [WILL BE UPLOADED](https://releases/v1.0-base.ckpt) | 245 MB |
+| **v1.1-enhanced** | AUC: 0 | [WILL BE UPLOADED](https://releases/v1.1-enhanced.ckpt) | 267 MB |
+| **v2.0-multimodal** | AUC: 0 | [WILL BE UPLOADED](https://releases/v2.0-multimodal.ckpt) | 312 MB |
 
 ---
 
