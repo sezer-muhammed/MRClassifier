@@ -194,103 +194,12 @@ graph LR
 | Method | Target AUC | Target Sensitivity | Target Specificity | Notes |
 |--------|------------|-------------------|-------------------|-------|
 | **Gazimed (Goal)** | **0.90+** | **85%+** | **85%+** | Multimodal + Clinical |
-| ResNet3D (Baseline) | 0.85 | 82% | 83% | MRI only |
-| CNN + PET (Baseline) | 0.87 | 84% | 85% | Imaging only |
-| Clinical Features | 0.78 | 75% | 79% | Traditional approach |
-| Radiologist | 0.83 | 79% | 86% | Human expert |
 
 ---
 
-## 🔒 Clinical Safety & Compliance
+## 📄 License
 
-### Regulatory Considerations
-- **FDA Guidelines**: Designed following FDA AI/ML guidance
-- **HIPAA Compliance**: Patient data protection protocols
-- **Clinical Validation**: Ongoing prospective studies
-- **Quality Assurance**: Continuous monitoring and validation
-
-### Data Security
-- End-to-end encryption for patient data
-- Secure API endpoints with authentication
-- Audit logging for all system interactions
-- GDPR compliance for international use
-
-### Limitations & Disclaimers
-- **Diagnostic Aid**: System provides risk assessment, not definitive diagnosis
-- **Clinical Judgment**: Results should be interpreted by qualified clinicians
-- **Population Bias**: Trained primarily on research cohorts
-- **Continuous Validation**: Performance monitoring in clinical settings required
-
----
-
-## 📚 Clinical Evidence & Publications
-
-### Peer-Reviewed Publications
-1. *"Multimodal Deep Learning for Early Alzheimer's Detection"* - Journal of Medical AI (2024)
-2. *"Cross-Attention Fusion in Medical Imaging"* - NeuroImage (2024)
-3. *"Clinical Validation of AI-Based AD Risk Assessment"* - Alzheimer's & Dementia (2024)
-
-### Conference Presentations
-- MICCAI 2024: Best Paper Award - Medical Image Analysis
-- RSNA 2024: Clinical Implementation of AI in Neuroimaging
-- AAIC 2024: Early Detection Technologies in Alzheimer's Disease
-
----
-
-## 🤝 Clinical Collaboration
-
-### Research Partnerships
-- **Mayo Clinic**: Clinical validation studies
-- **Johns Hopkins**: Longitudinal outcome tracking
-- **UCSF Memory Center**: Prospective clinical trials
-- **European AD Consortium**: Multi-site validation
-
-### Getting Involved
-- **Clinical Sites**: Partner with us for validation studies
-- **Researchers**: Access to anonymized datasets and models
-- **Developers**: Contribute to open-source components
-- **Clinicians**: Provide feedback on clinical workflow integration
-
----
-
-## 📞 Support & Contact
-
-### Clinical Support
-- **Email**: clinical-support@gazimed.ai
-- **Phone**: +1-800-GAZIMED (429-4633)
-- **Documentation**: [docs.gazimed.ai](https://docs.gazimed.ai)
-
-### Research Collaboration
-- **Email**: research@gazimed.ai
-- **Partnerships**: partnerships@gazimed.ai
-
-### Technical Support
-- **GitHub Issues**: [github.com/gazimed/alzheimers-detection/issues](https://github.com/gazimed/alzheimers-detection/issues)
-- **Developer Docs**: [dev.gazimed.ai](https://dev.gazimed.ai)
-
----
-
-## 📄 License & Citation
-
-### License
-This project is licensed under the MIT License for research use. Commercial licensing available for clinical deployment.
-
-### Citation
-```bibtex
-@article{gazimed2024alzheimers,
-  title={Gazimed: Multimodal Deep Learning for Early Alzheimer's Disease Detection},
-  author={Gazimed Research Team},
-  journal={Journal of Medical AI},
-  year={2024},
-  volume={12},
-  pages={1-15},
-  doi={10.1000/jmai.2024.gazimed}
-}
-```
-
----
-
-**⚠️ Important Clinical Notice**: This system is intended for research and clinical decision support only. It should not be used as the sole basis for clinical diagnosis or treatment decisions. Always consult with qualified healthcare professionals for medical advice and diagnosis.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
 
