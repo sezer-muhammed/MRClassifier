@@ -8,8 +8,11 @@ resampling, and normalization.
 
 import logging
 import warnings
+import os
+import time
+from functools import wraps
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, Dict, Any
 
 import nibabel as nib
 import numpy as np
@@ -20,8 +23,129 @@ from scipy import ndimage
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Suppress SimpleITK warnings for cleaner output
+# Comprehensive SimpleITK warning suppression
+# Suppress Python-level warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="SimpleITK")
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="SimpleITK")
+
+# Suppress SimpleITK C++ level warnings by redirecting ITK output
+try:
+    # Set ITK global warning display to off
+    sitk.ProcessObject_SetGlobalWarningDisplay(False)
+except AttributeError:
+    # Fallback for older SimpleITK versions
+    pass
+
+# Additional environment variable to suppress ITK warnings
+os.environ['ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS'] = '1'
+os.environ['ITK_USE_THREADPOOL'] = '0'
+
+
+# Timing utilities for performance profiling
+class Timer:
+    """Context manager for timing code blocks."""
+    
+    def __init__(self, name: str = "Operation", log_level: int = logging.INFO):
+        self.name = name
+        self.log_level = log_level
+        self.start_time = None
+        self.end_time = None
+    
+    def __enter__(self):
+        self.start_time = time.perf_counter()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.end_time = time.perf_counter()
+        duration = self.end_time - self.start_time
+        logger.log(self.log_level, f"{self.name} took {duration:.4f} seconds")
+    
+    @property
+    def duration(self) -> float:
+        """Get the duration of the timed operation."""
+        if self.start_time is None or self.end_time is None:
+            return 0.0
+        return self.end_time - self.start_time
+
+
+def time_function(func):
+    """Decorator to time function execution."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.perf_counter()
+        try:
+            result = func(*args, **kwargs)
+            end_time = time.perf_counter()
+            duration = end_time - start_time
+            logger.debug(f"{func.__name__} took {duration:.4f} seconds")
+            return result
+        except Exception as e:
+            end_time = time.perf_counter()
+            duration = end_time - start_time
+            logger.error(f"{func.__name__} failed after {duration:.4f} seconds: {str(e)}")
+            raise
+    return wrapper
+
+
+class PerformanceProfiler:
+    """Class to track and report performance metrics."""
+    
+    def __init__(self):
+        self.timings: Dict[str, list] = {}
+        self.counters: Dict[str, int] = {}
+    
+    def record_time(self, operation: str, duration: float):
+        """Record timing for an operation."""
+        if operation not in self.timings:
+            self.timings[operation] = []
+        self.timings[operation].append(duration)
+    
+    def increment_counter(self, counter: str):
+        """Increment a counter."""
+        self.counters[counter] = self.counters.get(counter, 0) + 1
+    
+    def get_stats(self, operation: str) -> Dict[str, float]:
+        """Get statistics for an operation."""
+        if operation not in self.timings or not self.timings[operation]:
+            return {}
+        
+        times = self.timings[operation]
+        return {
+            'count': len(times),
+            'total': sum(times),
+            'mean': np.mean(times),
+            'median': np.median(times),
+            'min': min(times),
+            'max': max(times),
+            'std': np.std(times)
+        }
+    
+    def report(self) -> str:
+        """Generate a performance report."""
+        report = ["\n=== Performance Report ==="]
+        
+        for operation, times in self.timings.items():
+            stats = self.get_stats(operation)
+            if stats:
+                report.append(f"\n{operation}:")
+                report.append(f"  Count: {stats['count']}")
+                report.append(f"  Total: {stats['total']:.4f}s")
+                report.append(f"  Mean: {stats['mean']:.4f}s")
+                report.append(f"  Median: {stats['median']:.4f}s")
+                report.append(f"  Min: {stats['min']:.4f}s")
+                report.append(f"  Max: {stats['max']:.4f}s")
+                report.append(f"  Std: {stats['std']:.4f}s")
+        
+        if self.counters:
+            report.append("\nCounters:")
+            for counter, value in self.counters.items():
+                report.append(f"  {counter}: {value}")
+        
+        return "\n".join(report)
+
+
+# Global profiler instance
+profiler = PerformanceProfiler()
 
 
 class NIfTILoader:
@@ -54,6 +178,7 @@ class NIfTILoader:
             self.n4_corrector.SetMaximumNumberOfIterations([n4_iterations])
             self.n4_corrector.SetConvergenceThreshold(n4_convergence_threshold)
     
+    @time_function
     def load_nifti(self, nifti_path: Union[str, Path]) -> np.ndarray:
         """
         Load NIfTI file and return as numpy array.
@@ -95,6 +220,7 @@ class NIfTILoader:
         except Exception as e:
             raise ValueError(f"Failed to load NIfTI file {nifti_path}: {str(e)}")
     
+    @time_function
     def apply_n4_bias_correction(self, volume: np.ndarray) -> np.ndarray:
         """
         Apply N4 bias field correction to volume.
@@ -249,12 +375,14 @@ class MNIRegistrationResampler:
     
     This class handles affine registration to MNI152 template space and 
     resampling to standardized 1mm³ isotropic resolution with target dimensions (91, 120, 91).
+    For pre-aligned data, registration can be skipped to avoid unnecessary processing.
     """
     
     def __init__(self, 
                  target_spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
                  target_size: Tuple[int, int, int] = (91, 120, 91),
-                 interpolation_method: str = 'linear'):
+                 interpolation_method: str = 'linear',
+                 skip_registration: bool = True):
         """
         Initialize MNI registration and resampling.
         
@@ -262,10 +390,12 @@ class MNIRegistrationResampler:
             target_spacing: Target voxel spacing in mm (x, y, z)
             target_size: Target volume dimensions (x, y, z)
             interpolation_method: Interpolation method ('linear', 'nearest', 'cubic')
+            skip_registration: If True, skip registration and only resample (for pre-aligned data)
         """
         self.target_spacing = target_spacing
         self.target_size = target_size
         self.interpolation_method = interpolation_method
+        self.skip_registration = skip_registration
         
         # Map interpolation methods to SimpleITK constants
         self.interpolation_map = {
@@ -346,18 +476,25 @@ class MNIRegistrationResampler:
         
         return template_image
     
+    @time_function
     def register_to_mni(self, volume: np.ndarray, 
                        original_spacing: Optional[Tuple[float, float, float]] = None) -> np.ndarray:
         """
         Register volume to MNI152 template space using affine transformation.
+        If skip_registration is True, only resampling is performed.
         
         Args:
             volume: 3D numpy array to register
             original_spacing: Original voxel spacing (if None, assumes 1mm isotropic)
             
         Returns:
-            Registered 3D numpy array
+            Registered/resampled 3D numpy array
         """
+        # Skip registration for pre-aligned data
+        if self.skip_registration:
+            logger.debug("Skipping registration for pre-aligned data, performing resampling only")
+            return self.resample_to_target(volume, original_spacing)
+        
         try:
             # Convert numpy array to SimpleITK image
             moving_image = sitk.GetImageFromArray(volume)
@@ -401,6 +538,7 @@ class MNIRegistrationResampler:
             logger.error(f"MNI registration failed: {str(e)}")
             raise ValueError(f"Failed to register volume to MNI space: {str(e)}")
     
+    @time_function
     def resample_to_target(self, volume: np.ndarray, 
                           original_spacing: Optional[Tuple[float, float, float]] = None) -> np.ndarray:
         """
@@ -559,6 +697,7 @@ class VolumeNormalizer:
         
         return mask
     
+    @time_function
     def zscore_normalize(self, volume: np.ndarray, mask: Optional[np.ndarray] = None) -> np.ndarray:
         """
         Apply Z-score normalization to volume.
@@ -570,27 +709,52 @@ class VolumeNormalizer:
         Returns:
             Z-score normalized volume
         """
+        # Check for and handle NaN/infinite values in input
+        if np.any(np.isnan(volume)) or np.any(np.isinf(volume)):
+            logger.warning("Input volume contains NaN or infinite values, cleaning them")
+            # Replace NaN with 0 and infinite values with volume max/min
+            volume = np.nan_to_num(volume, nan=0.0, posinf=np.nanmax(volume[np.isfinite(volume)]), 
+                                 neginf=np.nanmin(volume[np.isfinite(volume)]))
+        
         if mask is not None:
             # Calculate statistics only within the mask
             masked_values = volume[mask]
             if len(masked_values) == 0:
                 logger.warning("Empty mask provided, using whole volume for normalization")
-                mean_val = np.mean(volume)
-                std_val = np.std(volume)
+                # Use finite values only for statistics
+                finite_values = volume[np.isfinite(volume)]
+                if len(finite_values) == 0:
+                    logger.error("No finite values found in volume")
+                    return np.zeros_like(volume, dtype=np.float32)
+                mean_val = np.mean(finite_values)
+                std_val = np.std(finite_values)
             else:
-                mean_val = np.mean(masked_values)
-                std_val = np.std(masked_values)
+                # Use only finite values from mask
+                finite_masked = masked_values[np.isfinite(masked_values)]
+                if len(finite_masked) == 0:
+                    logger.error("No finite values found in masked region")
+                    return np.zeros_like(volume, dtype=np.float32)
+                mean_val = np.mean(finite_masked)
+                std_val = np.std(finite_masked)
         else:
-            mean_val = np.mean(volume)
-            std_val = np.std(volume)
+            # Use finite values only for statistics
+            finite_values = volume[np.isfinite(volume)]
+            if len(finite_values) == 0:
+                logger.error("No finite values found in volume")
+                return np.zeros_like(volume, dtype=np.float32)
+            mean_val = np.mean(finite_values)
+            std_val = np.std(finite_values)
         
-        # Avoid division by zero
-        if std_val == 0:
-            logger.warning("Standard deviation is zero, returning zero-centered volume")
-            return volume - mean_val
+        # Avoid division by zero or very small std
+        if std_val == 0 or std_val < 1e-8:
+            logger.warning(f"Standard deviation is {std_val}, returning zero-centered volume")
+            normalized_volume = volume - mean_val
+        else:
+            # Apply Z-score normalization
+            normalized_volume = (volume - mean_val) / std_val
         
-        # Apply Z-score normalization
-        normalized_volume = (volume - mean_val) / std_val
+        # Final check for NaN/infinite values and clean them
+        normalized_volume = np.nan_to_num(normalized_volume, nan=0.0, posinf=10.0, neginf=-10.0)
         
         return normalized_volume.astype(np.float32)
     
@@ -605,26 +769,51 @@ class VolumeNormalizer:
         Returns:
             Min-max normalized volume
         """
+        # Check for and handle NaN/infinite values in input
+        if np.any(np.isnan(volume)) or np.any(np.isinf(volume)):
+            logger.warning("Input volume contains NaN or infinite values, cleaning them")
+            # Replace NaN with 0 and infinite values with volume max/min
+            volume = np.nan_to_num(volume, nan=0.0, posinf=np.nanmax(volume[np.isfinite(volume)]), 
+                                 neginf=np.nanmin(volume[np.isfinite(volume)]))
+        
         if mask is not None:
             masked_values = volume[mask]
             if len(masked_values) == 0:
                 logger.warning("Empty mask provided, using whole volume for normalization")
-                min_val = np.min(volume)
-                max_val = np.max(volume)
+                # Use finite values only for statistics
+                finite_values = volume[np.isfinite(volume)]
+                if len(finite_values) == 0:
+                    logger.error("No finite values found in volume")
+                    return np.zeros_like(volume, dtype=np.float32)
+                min_val = np.min(finite_values)
+                max_val = np.max(finite_values)
             else:
-                min_val = np.min(masked_values)
-                max_val = np.max(masked_values)
+                # Use only finite values from mask
+                finite_masked = masked_values[np.isfinite(masked_values)]
+                if len(finite_masked) == 0:
+                    logger.error("No finite values found in masked region")
+                    return np.zeros_like(volume, dtype=np.float32)
+                min_val = np.min(finite_masked)
+                max_val = np.max(finite_masked)
         else:
-            min_val = np.min(volume)
-            max_val = np.max(volume)
+            # Use finite values only for statistics
+            finite_values = volume[np.isfinite(volume)]
+            if len(finite_values) == 0:
+                logger.error("No finite values found in volume")
+                return np.zeros_like(volume, dtype=np.float32)
+            min_val = np.min(finite_values)
+            max_val = np.max(finite_values)
         
-        # Avoid division by zero
-        if max_val == min_val:
-            logger.warning("Min and max values are equal, returning zero array")
-            return np.zeros_like(volume)
+        # Avoid division by zero or very small range
+        if max_val == min_val or abs(max_val - min_val) < 1e-8:
+            logger.warning(f"Min ({min_val}) and max ({max_val}) values are too close, returning zero array")
+            return np.zeros_like(volume, dtype=np.float32)
         
         # Apply min-max normalization
         normalized_volume = (volume - min_val) / (max_val - min_val)
+        
+        # Final check for NaN/infinite values and clean them
+        normalized_volume = np.nan_to_num(normalized_volume, nan=0.0, posinf=1.0, neginf=0.0)
         
         return normalized_volume.astype(np.float32)
     
@@ -654,6 +843,7 @@ class VolumeNormalizer:
         else:
             return volume.astype(np.float32)
     
+    @time_function
     def combine_volumes(self, mri_volume: np.ndarray, pet_volume: np.ndarray) -> np.ndarray:
         """
         Combine MRI and PET volumes into multi-channel tensor.
@@ -669,9 +859,24 @@ class VolumeNormalizer:
         if mri_volume.shape != pet_volume.shape:
             raise ValueError(f"MRI shape {mri_volume.shape} != PET shape {pet_volume.shape}")
         
+        # Check for NaN/infinite values in input volumes before normalization
+        if np.any(np.isnan(mri_volume)) or np.any(np.isinf(mri_volume)):
+            logger.warning("MRI volume contains NaN or infinite values before normalization")
+        if np.any(np.isnan(pet_volume)) or np.any(np.isinf(pet_volume)):
+            logger.warning("PET volume contains NaN or infinite values before normalization")
+        
         # Normalize volumes
         mri_normalized = self.normalize_volume(mri_volume)
         pet_normalized = self.normalize_volume(pet_volume)
+        
+        # Validate normalized volumes
+        if np.any(np.isnan(mri_normalized)) or np.any(np.isinf(mri_normalized)):
+            logger.error("MRI volume contains NaN or infinite values after normalization")
+            mri_normalized = np.nan_to_num(mri_normalized, nan=0.0, posinf=10.0, neginf=-10.0)
+        
+        if np.any(np.isnan(pet_normalized)) or np.any(np.isinf(pet_normalized)):
+            logger.error("PET volume contains NaN or infinite values after normalization")
+            pet_normalized = np.nan_to_num(pet_normalized, nan=0.0, posinf=10.0, neginf=-10.0)
         
         # Combine into multi-channel tensor
         combined = np.stack([mri_normalized, pet_normalized], axis=0)
@@ -679,7 +884,14 @@ class VolumeNormalizer:
         # Add difference channel if requested
         if self.include_difference_channel:
             difference_channel = pet_normalized - mri_normalized
+            # Clean difference channel
+            difference_channel = np.nan_to_num(difference_channel, nan=0.0, posinf=10.0, neginf=-10.0)
             combined = np.concatenate([combined, difference_channel[np.newaxis, ...]], axis=0)
+        
+        # Final validation of combined volume
+        if np.any(np.isnan(combined)) or np.any(np.isinf(combined)):
+            logger.error("Combined volume still contains NaN or infinite values, performing final cleanup")
+            combined = np.nan_to_num(combined, nan=0.0, posinf=10.0, neginf=-10.0)
         
         logger.debug(f"Combined volumes into tensor with shape {combined.shape}")
         return combined.astype(np.float32)
@@ -727,7 +939,8 @@ class PreprocessingPipeline:
                  target_size: Tuple[int, int, int] = (91, 120, 91),
                  normalization_method: str = 'zscore',
                  include_difference_channel: bool = False,
-                 interpolation_method: str = 'linear'):
+                 interpolation_method: str = 'linear',
+                 skip_registration: bool = True):
         """
         Initialize preprocessing pipeline.
         
@@ -738,12 +951,14 @@ class PreprocessingPipeline:
             normalization_method: Volume normalization method
             include_difference_channel: Whether to include difference channel
             interpolation_method: Interpolation method for resampling
+            skip_registration: Skip registration for pre-aligned data (default: True)
         """
         self.loader = NIfTILoader(apply_n4_correction=apply_n4_correction)
         self.registrar = MNIRegistrationResampler(
             target_spacing=target_spacing,
             target_size=target_size,
-            interpolation_method=interpolation_method
+            interpolation_method=interpolation_method,
+            skip_registration=skip_registration
         )
         self.normalizer = VolumeNormalizer(
             normalization_method=normalization_method,
@@ -765,41 +980,63 @@ class PreprocessingPipeline:
         Returns:
             Preprocessed multi-channel volume with shape (2-3, 91, 120, 91)
         """
+        pipeline_start = time.perf_counter()
+        
         try:
             # Step 1: Load and apply N4 bias correction
-            logger.info(f"Loading MRI: {mri_path}")
-            mri_volume = self.loader.load_and_correct(mri_path)
+            with Timer(f"Loading MRI {Path(mri_path).name}", logging.INFO):
+                logger.info(f"Loading MRI: {mri_path}")
+                mri_volume = self.loader.load_and_correct(mri_path)
+                profiler.increment_counter("mri_volumes_loaded")
             
-            logger.info(f"Loading PET: {pet_path}")
-            pet_volume = self.loader.load_and_correct(pet_path)
+            with Timer(f"Loading PET {Path(pet_path).name}", logging.INFO):
+                logger.info(f"Loading PET: {pet_path}")
+                pet_volume = self.loader.load_and_correct(pet_path)
+                profiler.increment_counter("pet_volumes_loaded")
             
             # Step 2: Register to MNI space and resample
-            logger.info("Registering MRI to MNI space")
-            mri_registered = self.registrar.register_to_mni(mri_volume)
+            with Timer("MRI registration/resampling", logging.INFO):
+                logger.info("Processing MRI (registration/resampling)")
+                mri_registered = self.registrar.register_to_mni(mri_volume)
             
-            logger.info("Registering PET to MNI space")
-            pet_registered = self.registrar.register_to_mni(pet_volume)
+            with Timer("PET registration/resampling", logging.INFO):
+                logger.info("Processing PET (registration/resampling)")
+                pet_registered = self.registrar.register_to_mni(pet_volume)
             
             # Step 3: Validate dimensions
-            if not self.registrar.validate_output_dimensions(mri_registered):
-                raise ValueError("MRI registration failed dimension validation")
-            
-            if not self.registrar.validate_output_dimensions(pet_registered):
-                raise ValueError("PET registration failed dimension validation")
+            with Timer("Dimension validation", logging.DEBUG):
+                if not self.registrar.validate_output_dimensions(mri_registered):
+                    raise ValueError("MRI registration failed dimension validation")
+                
+                if not self.registrar.validate_output_dimensions(pet_registered):
+                    raise ValueError("PET registration failed dimension validation")
             
             # Step 4: Normalize and combine volumes
-            logger.info("Normalizing and combining volumes")
-            combined_volume = self.normalizer.combine_volumes(mri_registered, pet_registered)
+            with Timer("Volume normalization and combination", logging.INFO):
+                logger.info("Normalizing and combining volumes")
+                combined_volume = self.normalizer.combine_volumes(mri_registered, pet_registered)
             
             # Step 5: Final validation
-            if not self.normalizer.validate_combined_volume(combined_volume):
-                raise ValueError("Combined volume failed validation")
+            with Timer("Final validation", logging.DEBUG):
+                if not self.normalizer.validate_combined_volume(combined_volume):
+                    raise ValueError("Combined volume failed validation")
             
-            logger.info(f"Successfully processed volume pair with final shape {combined_volume.shape}")
+            # Record total pipeline time
+            pipeline_end = time.perf_counter()
+            pipeline_duration = pipeline_end - pipeline_start
+            profiler.record_time("complete_pipeline", pipeline_duration)
+            profiler.increment_counter("successful_pairs_processed")
+            
+            logger.info(f"Successfully processed volume pair with final shape {combined_volume.shape} in {pipeline_duration:.4f}s")
             return combined_volume
             
         except Exception as e:
-            logger.error(f"Preprocessing failed for {mri_path}, {pet_path}: {str(e)}")
+            pipeline_end = time.perf_counter()
+            pipeline_duration = pipeline_end - pipeline_start
+            profiler.record_time("failed_pipeline", pipeline_duration)
+            profiler.increment_counter("failed_pairs_processed")
+            
+            logger.error(f"Preprocessing failed for {mri_path}, {pet_path} after {pipeline_duration:.4f}s: {str(e)}")
             raise ValueError(f"Preprocessing pipeline failed: {str(e)}")
     
     def get_output_shape(self) -> Tuple[int, int, int, int]:
@@ -838,3 +1075,33 @@ def preprocess_volume_pair(mri_path: Union[str, Path],
     )
     
     return pipeline.process_volume_pair(mri_path, pet_path)
+
+
+def get_performance_report() -> str:
+    """
+    Get a comprehensive performance report from the global profiler.
+    
+    Returns:
+        Formatted performance report string
+    """
+    return profiler.report()
+
+
+def reset_performance_profiler():
+    """
+    Reset the global performance profiler to start fresh measurements.
+    """
+    global profiler
+    profiler = PerformanceProfiler()
+    logger.info("Performance profiler reset")
+
+
+def log_performance_summary():
+    """
+    Log a summary of current performance metrics.
+    """
+    report = profiler.report()
+    if report.strip():
+        logger.info(report)
+    else:
+        logger.info("No performance data available yet")
