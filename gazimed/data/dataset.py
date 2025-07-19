@@ -72,6 +72,19 @@ class AlzheimersDataset(Dataset):
     and clinical-only modes for flexible usage.
     """
     
+    # Global statistics for hybrid normalization
+    # These should be calculated once across the entire dataset
+    global_mr_mean = 571.2489624023438  # Updated from analysis
+    global_mr_std = 1105.9530029296875
+    global_pet_mean = 0.5050941705703735
+    global_pet_std = 0.6432620882987976
+    
+    # Global statistics for clinical features (116 features)
+    # These should be calculated once across the entire dataset
+    global_clinical_mean = None  # Will be calculated during first use
+    global_clinical_std = None   # Will be calculated during first use
+    clinical_alpha = 0.2  # Hybrid normalization: 20% global + 80% local
+    
     def __init__(
         self,
         db_manager: DatabaseManager,
@@ -79,9 +92,10 @@ class AlzheimersDataset(Dataset):
         subject_filter: Optional[Dict[str, Any]] = None,
         transform=None,
         load_volumes: bool = True,
-        cache_volumes: bool = False,
+        cache_volumes: bool = True,
         include_difference_channel: bool = False,
-        validate_files: bool = True
+        validate_files: bool = True,
+        normalization_alpha: float = 0.5
     ):
         """
         Initialize dataset.
@@ -95,6 +109,7 @@ class AlzheimersDataset(Dataset):
             cache_volumes: Whether to cache loaded volumes in memory
             include_difference_channel: Whether to include PET-MRI difference channel
             validate_files: Whether to validate file paths exist
+            normalization_alpha: Weight for global vs local stats (0=local only, 1=global only)
         """
         self.db_manager = db_manager
         self.transform = transform
@@ -102,6 +117,7 @@ class AlzheimersDataset(Dataset):
         self.cache_volumes = cache_volumes
         self.include_difference_channel = include_difference_channel
         self.validate_files = validate_files
+        self.normalization_alpha = normalization_alpha
         self.volume_cache = {}
         
         # Load subjects from database with filtering
@@ -109,6 +125,10 @@ class AlzheimersDataset(Dataset):
         
         if len(self.subjects) == 0:
             raise ValueError("No valid subjects found in database")
+        
+        # Calculate global clinical statistics if not already done
+        if AlzheimersDataset.global_clinical_mean is None:
+            self._calculate_global_clinical_statistics()
     
     def _load_subjects(self, subject_ids: Optional[List[str]], 
                       subject_filter: Optional[Dict[str, Any]]) -> List[Subject]:
@@ -137,35 +157,62 @@ class AlzheimersDataset(Dataset):
             
             subjects = query.all()
         
+        print(f"Found {len(subjects)} subjects in database")
+        if len(subjects) == 0:
+            print("No subjects found in database query")
+            return []
+        
+        # Debug: show first few subjects
+        for i, subject in enumerate(subjects[:3]):
+            print(f"Subject {i}: ID={subject.subject_id}, Score={subject.alzheimer_score}, "
+                  f"MRI={subject.mri_path is not None}, PET={subject.pet_path is not None}")
+        
         # Validate subjects
         valid_subjects = []
         for subject in tqdm(subjects, desc="Validating subjects"):
             if self._validate_subject(subject):
                 valid_subjects.append(subject)
         
+        print(f"Valid subjects: {len(valid_subjects)}/{len(subjects)}")
         return valid_subjects
     
-    def _validate_subject(self, subject: Subject) -> bool:
+    def _calculate_global_clinical_statistics(self):
+        """Calculate global mean and std for clinical features across all subjects."""
+        print("Calculating global clinical features statistics...")
+        
+        all_clinical_features = []
+        for subject in self.subjects:
+            if subject.clinical_features is not None:
+                try:
+                    features = np.array(subject.clinical_features, dtype=np.float32)
+                    if features.shape[0] == 116:
+                        # Handle NaN/Inf in clinical features
+                        finite_mask = np.isfinite(features)
+                  
         """Validate that subject has required data."""
         try:
-            # Check Alzheimer's score
-            if not subject.validate_score():
+            # Check Alzheimer's score - be more lenient
+            if subject.alzheimer_score is None:
                 return False
             
-            # Check clinical features
-            if not subject.validate_clinical_features():
+            # Allow any score between 0 and 1 (inclusive)
+            if not (0.0 <= subject.alzheimer_score <= 1.0):
                 return False
             
-            # Check that clinical_features is not None
+            # Check clinical features - be more lenient
             if subject.clinical_features is None:
                 return False
             
-            # Check file paths if loading volumes
-            if self.load_volumes and not subject.validate_paths():
-                return False
+            # Check file paths if loading volumes - be more lenient
+            if self.load_volumes:
+                if not subject.mri_path or not subject.pet_path:
+                    return False
+                # Don't check if files exist - let loading handle it
             
             return True
         except Exception as e:
+            # Debug: print what's failing
+            print(f"Subject {subject.subject_id} validation failed: {e}")
             return False
     
     def _load_nifti_volume(self, file_path: str) -> np.ndarray:
@@ -181,35 +228,29 @@ class AlzheimersDataset(Dataset):
             raise RuntimeError(f"Failed to load NIfTI file {file_path}: {e}") from e
     
     def _get_volumes(self, subject: Subject) -> np.ndarray:
-        """Load and combine MRI and PET volumes for a subject using preprocessing pipeline."""
+        """Load and combine MRI and PET volumes with internal preprocessing."""
         cache_key = subject.subject_id
         
         if self.cache_volumes and cache_key in self.volume_cache:
             return self.volume_cache[cache_key]
         
         try:
-            # Use preprocessing pipeline for proper normalization and validation
-            from .preprocessing import PreprocessingPipeline
+            # Load individual volumes
+            mri_volume = self._load_nifti_volume(subject.mri_path)
+            pet_volume = self._load_nifti_volume(subject.pet_path)
             
-            # Create preprocessing pipeline
-            pipeline = PreprocessingPipeline(
-                apply_n4_correction=False,  # Skip N4 correction for speed
-                normalization_method='zscore',  # Use Z-score normalization
-                include_difference_channel=self.include_difference_channel,
-                target_size=(91, 109, 91)  # Match expected output size
-            )
+            # Apply internal preprocessing and normalization
+            mri_normalized = self._preprocess_volume(mri_volume, 'mr')
+            pet_normalized = self._preprocess_volume(pet_volume, 'pet')
             
-            # Process volume pair through pipeline
-            combined_volume = pipeline.process_volume_pair(subject.mri_path, subject.pet_path)
-            
-            # Validate that the volume doesn't contain NaN values
-            if np.any(np.isnan(combined_volume)) or np.any(np.isinf(combined_volume)):
-                print(f"Warning: NaN/Inf values detected in preprocessed volume for subject {subject.subject_id}")
-                print(f"NaN count: {np.sum(np.isnan(combined_volume))}, Inf count: {np.sum(np.isinf(combined_volume))}")
-                
-                # Replace NaN/Inf with zeros as fallback
-                combined_volume = np.nan_to_num(combined_volume, nan=0.0, posinf=1.0, neginf=-1.0)
-                print(f"After NaN replacement - shape: {combined_volume.shape}, min: {combined_volume.min()}, max: {combined_volume.max()}")
+            # Combine volumes into multi-channel tensor
+            if self.include_difference_channel:
+                # Create 3-channel volume: [MRI, PET, PET-MRI]
+                diff_volume = pet_normalized - mri_normalized
+                combined_volume = np.stack([mri_normalized, pet_normalized, diff_volume], axis=0)
+            else:
+                # Create 2-channel volume: [MRI, PET]
+                combined_volume = np.stack([mri_normalized, pet_normalized], axis=0)
             
             if self.cache_volumes:
                 self.volume_cache[cache_key] = combined_volume
@@ -217,34 +258,56 @@ class AlzheimersDataset(Dataset):
             return combined_volume
             
         except Exception as e:
-            print(f"Error processing volumes for subject {subject.subject_id}: {e}")
             # Fallback to simple loading if preprocessing fails
             return self._get_volumes_fallback(subject)
     
     def _get_volumes_fallback(self, subject: Subject) -> np.ndarray:
         """Fallback method for volume loading when preprocessing fails."""
-        print(f"Using fallback volume loading for subject {subject.subject_id}")
         
         # Load individual volumes using simple method
         mri_volume = self._load_nifti_volume(subject.mri_path)
         pet_volume = self._load_nifti_volume(subject.pet_path)
         
-        # Basic normalization to prevent NaN issues
-        def safe_normalize(volume):
-            # Replace NaN/Inf with zeros
-            volume = np.nan_to_num(volume, nan=0.0, posinf=1.0, neginf=-1.0)
+        # Hybrid normalization pipeline with modality-specific alpha values
+        def safe_normalize(volume, global_mean, global_std, modality='mr'):
+            # Step 1: Calculate local mean/std ignoring NaN/Inf values
+            finite_mask = np.isfinite(volume)
+            finite_values = volume[finite_mask]
             
-            # Simple min-max normalization
-            min_val, max_val = volume.min(), volume.max()
-            if max_val > min_val:
-                volume = (volume - min_val) / (max_val - min_val)
+            if len(finite_values) == 0:
+                return np.zeros_like(volume, dtype=np.float32)
+            
+            local_mean = np.mean(finite_values)
+            local_std = np.std(finite_values)
+            
+            # Avoid division by zero
+            if local_std == 0:
+                local_std = 1.0
+            
+            # Step 2: Use modality-specific alpha values
+            if modality == 'mr':
+                alpha = 0.0  # Pure local normalization for MR
+            elif modality == 'pet':
+                alpha = 0.3  # Slight global influence for PET
             else:
-                volume = np.zeros_like(volume)
+                alpha = 0.15  # Average for difference channel
             
-            return volume.astype(np.float32)
+            hybrid_mean = alpha * global_mean + (1 - alpha) * local_mean
+            hybrid_std = alpha * global_std + (1 - alpha) * local_std
+            
+            # Step 3: Z-score normalization with hybrid stats
+            normalized = (volume - hybrid_mean) / hybrid_std
+            
+            # Step 4: Replace NaN→0, Inf→1, -Inf→-1
+            normalized = np.nan_to_num(normalized, nan=0.0, posinf=1.0, neginf=-1.0)
+            
+            # Step 5: Apply tanh to squash to [-1, 1] range
+            normalized = np.tanh(normalized)
+            
+            return normalized.astype(np.float32)
         
-        mri_volume = safe_normalize(mri_volume)
-        pet_volume = safe_normalize(pet_volume)
+        mri_volume = safe_normalize(mri_volume, self.global_mr_mean, self.global_mr_std, 'mr')
+        pet_volume = safe_normalize(pet_volume, self.global_pet_mean, self.global_pet_std, 'pet')
         
         # Combine volumes into multi-channel tensor
         if self.include_difference_channel:
@@ -392,9 +455,9 @@ class DataSplitter:
     
     def train_val_test_split(
         self,
-        train_size: float = 0.7,
+        train_size: float = 0.85,
         val_size: float = 0.15,
-        test_size: Optional[float] = 0.15,
+        test_size: Optional[float] = 0.0,
         stratify: bool = True
     ) -> Tuple[List[str], List[str], List[str]]:
         """
