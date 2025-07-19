@@ -13,7 +13,7 @@ from datetime import datetime
 import numpy as np
 import torch
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor, TQDMProgressBar
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
@@ -22,6 +22,22 @@ from gazimed.models import HybridAlzheimersModel
 from gazimed.data.database import DatabaseManager
 from gazimed.data.dataset import AlzheimersDataset, custom_collate_fn, DataSplitter
 
+class CustomProgressBar(TQDMProgressBar):
+    def init_train_tqdm(self):
+        bar = super().init_train_tqdm()
+        # label bar “Train”
+        bar.set_description("Train")
+        return bar
+
+    def get_metrics(self, trainer, pl_module):
+        # gather the metrics you logged in your LightningModule
+        metrics = {
+            "epoch": f"{trainer.current_epoch+1}/{trainer.max_epochs}",
+            "train_acc": trainer.callback_metrics.get("train_accuracy", 0),
+            "train_loss": trainer.callback_metrics.get("train_loss", 0),
+            "val_acc": trainer.callback_metrics.get("val_accuracy", 0),
+        }
+        return metrics
 
 def setup_directories(experiment_name: str):
     """Setup experiment directories"""
@@ -45,111 +61,44 @@ def create_data_loaders(
     num_workers: int = 0,
     random_state: int = 42
 ):
-    """Create train and validation data loaders"""
-    
-    print("Creating data loaders...")
-    
+    from gazimed.data.dataset import create_data_loaders as core_create_data_loaders
+
+    """Create train and validation data loaders with balanced sampling (50/50 output 0/1)"""
+    print("Creating data loaders (with balanced sampling)...")
     # Create data splitter
     splitter = DataSplitter(db_manager, random_state=random_state)
-    
-    # Get train/val splits
-    train_ids, val_ids , _= splitter.train_val_test_split(
+    train_ids, val_ids, _ = splitter.train_val_test_split(
         train_size=train_split,
         val_size=val_split,
-        test_size=0.0,  # No test set for now
+        test_size=0.0,
         stratify=True
     )
-    
     print(f"Train subjects: {len(train_ids)}")
     print(f"Validation subjects: {len(val_ids)}")
-    
-    # Create datasets
-    train_dataset = AlzheimersDataset(
+    # Use the core utility with balanced_sampling=True for train loader
+    data_loaders = core_create_data_loaders(
         db_manager=db_manager,
-        subject_ids=train_ids,
+        train_ids=train_ids,
+        val_ids=val_ids,
+        test_ids=None,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        train_transform=None,
+        val_transform=None,
         load_volumes=True,
-        cache_volumes=False,  # Disable caching to save memory
-        target_size=target_size,
-        validate_files=False
+        include_difference_channel=False,
+        subject_filter=None,
+        balanced_sampling=True,  # <--- Ensures 50/50 class balance in training
+        target_size=target_size
     )
-    
-    val_dataset = AlzheimersDataset(
-        db_manager=db_manager,
-        subject_ids=val_ids,
-        load_volumes=True,
-        cache_volumes=False,
-        target_size=target_size,
-        validate_files=False
-    )
-    
+    train_loader = data_loaders['train']
+    val_loader = data_loaders['val']
+    # Datasets are accessible via train_loader.dataset, val_loader.dataset
+    train_dataset = train_loader.dataset
+    val_dataset = val_loader.dataset
     print(f"Train dataset size: {len(train_dataset)}")
     print(f"Validation dataset size: {len(val_dataset)}")
-    
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        collate_fn=custom_collate_fn,
-        pin_memory=True if torch.cuda.is_available() else False,
-        drop_last=True  # Drop last incomplete batch
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        collate_fn=custom_collate_fn,
-        pin_memory=True if torch.cuda.is_available() else False,
-        drop_last=False
-    )
-    
     return train_loader, val_loader, train_dataset, val_dataset
-
-
-def create_model(target_size: tuple = (96, 109, 96), **kwargs):
-    """Create and configure the hybrid model"""
-    
-    print("Creating hybrid model...")
-
-    # Default model configuration
-    model_config = {
-        "target_size": target_size,
-        "swin_config": {
-            "in_channels": 2,
-            "depths": [2, 2, 6, 2],
-            "num_heads": [3, 6, 12, 24],
-            "dropout_path_rate": 0.1,
-            "feature_size": 64
-        },
-        "clinical_dims": [116, 32, 16, 8],
-        "fusion_dims": [72, 32, 16, 1],
-        "learning_rate": 1e-4,
-        "weight_decay": 1e-2,
-        "optimizer_type": "adamw",
-        "scheduler_type": "cosine",
-        "loss_type": "bce",
-        "dropout_rate": 0.1,
-        "use_batch_norm": False,
-        "fusion_strategy": "concatenate"
-    }
-    
-    # Update with any provided kwargs
-    model_config.update(kwargs)
-    
-    # Create model
-    model = HybridAlzheimersModel(**model_config)
-    
-    # Print model summary
-    summary = model.get_model_summary()
-    print(f"Model created with {summary['total_parameters']:,} parameters")
-    print("Component breakdown:")
-    for component, count in summary['component_parameters'].items():
-        print(f"  - {component}: {count:,} parameters")
-    
-    return model
 
 
 def setup_callbacks(exp_dir: Path, monitor_metric: str = "val_loss"):
@@ -173,7 +122,7 @@ def setup_callbacks(exp_dir: Path, monitor_metric: str = "val_loss"):
     early_stop_callback = EarlyStopping(
         monitor=monitor_metric,
         mode="min",
-        patience=15,
+        patience=80,
         verbose=True,
         min_delta=0.001
     )
@@ -204,6 +153,7 @@ def setup_trainer(
     
     # Setup callbacks
     callbacks = setup_callbacks(exp_dir)
+    callbacks.append(CustomProgressBar())
     
     # Create trainer
     trainer = pl.Trainer(
@@ -213,9 +163,9 @@ def setup_trainer(
         precision=precision,
         logger=logger,
         callbacks=callbacks,
-        gradient_clip_val=1.0,  # Gradient clipping
-        accumulate_grad_batches=1,
-        log_every_n_steps=10,
+        gradient_clip_val=2.0,  # Gradient clipping
+        accumulate_grad_batches=2,
+        log_every_n_steps=3,
         val_check_interval=1.0,  # Validate every epoch
         enable_progress_bar=True,
         enable_model_summary=True
@@ -286,13 +236,32 @@ def train_model(
         num_workers=num_workers,
         random_state=random_state
     )
-    
+    # Default model configuration
+    model_config = {
+        "target_size": target_size,
+        "swin_config": {
+            "in_channels": 2,
+            "depths": [1, 2, 4, 1],
+            "num_heads": [3, 6, 12, 24],
+            "dropout_path_rate": 0.1,
+            "patch_size": 6,
+            "feature_size": 96
+        },
+        "clinical_dims": [116, 32, 16, 8],
+        "fusion_dims": [104, 32, 16, 1],
+        "learning_rate": 1e-4,
+        "weight_decay": 1e-2,
+        "optimizer_type": "adamw",
+        "scheduler_type": "cosine",
+        "loss_type": "bce",
+        "dropout_rate": 0.15,
+        "use_batch_norm": False,
+        "fusion_strategy": "concatenate"
+    }
+    # Update with any provided kwargs
+    print(f"Model configuration: {json.dumps(model_config, indent=2)}")
     # Create model
-    model = create_model(
-        target_size=target_size,
-        learning_rate=learning_rate,
-        weight_decay=weight_decay
-    )
+    model = HybridAlzheimersModel(**model_config)
     
     # Setup trainer
     trainer = setup_trainer(
@@ -373,9 +342,9 @@ def main():
                        help="Target size for input volumes (H W D)")
     
     # Training settings
-    parser.add_argument("--batch-size", type=int, default=1,
+    parser.add_argument("--batch-size", type=int, default=4,
                        help="Batch size for training")
-    parser.add_argument("--max-epochs", type=int, default=100,
+    parser.add_argument("--max-epochs", type=int, default=250,
                        help="Maximum number of training epochs")
     parser.add_argument("--learning-rate", type=float, default=1e-4,
                        help="Learning rate")
@@ -383,9 +352,9 @@ def main():
                        help="Weight decay for regularization")
     
     # Data settings
-    parser.add_argument("--train-split", type=float, default=0.8,
+    parser.add_argument("--train-split", type=float, default=0.83,
                        help="Fraction of data for training")
-    parser.add_argument("--val-split", type=float, default=0.2,
+    parser.add_argument("--val-split", type=float, default=0.17,
                        help="Fraction of data for validation")
     parser.add_argument("--num-workers", type=int, default=0,
                        help="Number of data loader workers")

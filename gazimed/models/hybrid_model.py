@@ -190,9 +190,9 @@ class HybridAlzheimersModel(pl.LightningModule):
         accuracy = torch.mean((predicted_binary == targets).float())
         
         # Log metrics
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train_mae", mae, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train_accuracy", accuracy, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("train_mae", mae, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("train_accuracy", accuracy, on_step=False, on_epoch=True, prog_bar=True)
         
         # Store for epoch-level tracking
         self.train_losses.append(loss.item())
@@ -339,17 +339,19 @@ class HybridAlzheimersModel(pl.LightningModule):
     def on_train_epoch_end(self):
         """Called at the end of training epoch"""
         if self.train_losses:
-            avg_train_loss = np.mean(self.train_losses)
-            self.log("epoch_train_loss", avg_train_loss)
+            avg_train_loss = float(np.mean(self.train_losses))
+            print(f"\n[Epoch {self.current_epoch}] Train Loss: {avg_train_loss:.4f}")
+            self.log("epoch_train_loss", avg_train_loss, prog_bar=True)
             self.train_losses.clear()
-    
+
     def on_validation_epoch_end(self):
         """Called at the end of validation epoch"""
         if self.val_losses:
-            avg_val_loss = np.mean(self.val_losses)
-            avg_val_mae = np.mean(self.val_maes)
-            self.log("epoch_val_loss", avg_val_loss)
-            self.log("epoch_val_mae", avg_val_mae)
+            avg_val_loss = float(np.mean(self.val_losses))
+            avg_val_mae = float(np.mean(self.val_maes))
+            print(f"[Epoch {self.current_epoch}] Val Loss: {avg_val_loss:.4f} | Val MAE: {avg_val_mae:.4f}")
+            self.log("epoch_val_loss", avg_val_loss, prog_bar=True)
+            self.log("epoch_val_mae", avg_val_mae, prog_bar=True)
             self.val_losses.clear()
             self.val_maes.clear()
     

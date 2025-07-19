@@ -244,11 +244,11 @@ class SwinUNet3DBackbone(nn.Module):
     def __init__(
         self,
         in_channels: int = 2,
-        depths: List[int] = [2, 2, 6, 2],
-        num_heads: List[int] = [3, 6, 12, 24],
+        depths: List[int] = [1, 1, 2, 1],
+        num_heads: List[int] = [2, 4, 8, 16],
         dropout_path_rate: float = 0.1,
-        feature_size: int = 96,
-        patch_size: int = 4,
+        feature_size: int = 64,
+        patch_size: int = 8,
         window_size: int = 7,
         mlp_ratio: float = 4.0,
         qkv_bias: bool = True,
@@ -281,7 +281,7 @@ class SwinUNet3DBackbone(nn.Module):
         self.num_layers = len(depths)
         
         # Patch embedding - use smaller embedding dimension to save RAM
-        embed_dim = 96
+        embed_dim = feature_size
         self.patch_embed = PatchEmbed3D(
             patch_size=patch_size, 
             in_chans=in_channels, 

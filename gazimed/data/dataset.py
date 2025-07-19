@@ -997,13 +997,16 @@ def create_data_loaders(
         Dictionary of DataLoaders
     """
     # Create datasets
+    # Use create_train_transforms if train_transform is not provided
+    if train_transform is None:
+        train_transform = create_train_transforms(target_size if target_size is not None else (96, 96, 96))
     train_dataset = AlzheimersDataset(
         db_manager=db_manager,
         subject_ids=train_ids,
         subject_filter=subject_filter,
         transform=train_transform,
         load_volumes=load_volumes,
-        cache_volumes=False,  # Don't cache for training (memory intensive)
+        cache_volumes=True,  # Don't cache for training (memory intensive)
         include_difference_channel=include_difference_channel,
         target_size=target_size
     )
